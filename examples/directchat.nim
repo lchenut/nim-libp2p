@@ -179,7 +179,7 @@ proc main() {.async.} =
 
   switch.mount(ChatProto.new(chat))
 
-  let libp2pFuts = await switch.start()
+  await switch.start()
 
   let id = $switch.peerInfo.peerId
   echo "PeerID: " & id
@@ -188,6 +188,5 @@ proc main() {.async.} =
     echo &"{a}/p2p/{id}"
 
   await chat.readLoop()
-  await allFuturesThrowing(libp2pFuts)
 
 waitFor(main())
