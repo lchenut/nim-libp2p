@@ -103,6 +103,24 @@ method readOnce*(s: ChronosStream, pbytes: pointer, nbytes: int): Future[int] {.
       if s.tracked:
         libp2p_peers_traffic_read.inc(nbytes.int64, labelValues = [s.shortAgent])
 
+proc completeWrite(
+    s: ChronosStream, fut: Future[int], msgLen: int): Future[void] {.async.} =
+  withExceptions:
+    # StreamTransport will only return written < msg.len on fatal failures where
+    # further writing is not possible - in such cases, we'll raise here,
+    # since we don't return partial writes lengths
+    var written = await fut
+
+    if written < msgLen:
+      raise (ref LPStreamClosedError)(msg: "Write couldn't finish writing")
+
+    s.activity = true # reset activity flag
+    libp2p_network_bytes.inc(msgLen.int64, labelValues = ["out"])
+    when defined(libp2p_agents_metrics):
+      s.trackPeerIdentity()
+      if s.tracked:
+        libp2p_peers_traffic_write.inc(msgLen.int64, labelValues = [s.shortAgent])
+
 method write*(s: ChronosStream, msg: seq[byte]): Future[void] =
   # Avoid a copy of msg being kept in the closure created by `{.async.}` as this
   # drives up memory usage
@@ -111,25 +129,7 @@ method write*(s: ChronosStream, msg: seq[byte]): Future[void] =
     fut.fail(newLPStreamClosedError())
     return fut
 
-  let msgLen = msg.len.int64
-  proc complete(s: ChronosStream, fut: Future[int]): Future[void] {.async.} =
-    withExceptions:
-      # StreamTransport will only return written < msg.len on fatal failures where
-      # further writing is not possible - in such cases, we'll raise here,
-      # since we don't return partial writes lengths
-      var written = await fut
-
-      if written < msgLen:
-        raise (ref LPStreamClosedError)(msg: "Write couldn't finish writing")
-
-      s.activity = true # reset activity flag
-      libp2p_network_bytes.inc(msgLen.int64, labelValues = ["out"])
-      when defined(libp2p_agents_metrics):
-        s.trackPeerIdentity()
-        if s.tracked:
-          libp2p_peers_traffic_write.inc(msgLen.int64, labelValues = [s.shortAgent])
-
-  complete(s, s.client.write(msg))
+  s.completeWrite(s.client.write(msg), msg.len)
 
 method closed*(s: ChronosStream): bool =
   s.client.closed

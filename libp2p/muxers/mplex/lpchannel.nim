@@ -175,6 +175,46 @@ method readOnce*(s: LPChannel,
     await s.reset()
     raise exc
 
+proc prepareWrite(s: LPChannel, msg: seq[byte]): Future[void] {.async.} =
+  # prepareWrite is the slow path of writing a message - see conditions in
+  # write
+  if s.closedLocal or s.conn.closed:
+    raise newLPStreamClosedError()
+
+  if msg.len == 0:
+    return
+
+  if s.writes >= MaxWrites:
+    debug "Closing connection, too many in-flight writes on channel",
+      s, conn = s.conn, writes = s.writes
+    await s.reset()
+    await s.conn.close()
+    return
+
+  if not s.isOpen:
+    await s.open()
+
+  await s.conn.writeMsg(s.id, s.msgCode, msg)
+
+proc completeWrite(
+    s: LPChannel, fut: Future[void], msgLen: int): Future[void] {.async.} =
+  try:
+    s.writes += 1
+
+    await fut
+    when defined(libp2p_network_protocols_metrics):
+      if s.tag.len > 0:
+        libp2p_protocols_bytes.inc(msgLen.int64, labelValues=[s.tag, "out"])
+
+    s.activity = true
+  except CatchableError as exc:
+    trace "exception in lpchannel write handler", s, msg = exc.msg
+    await s.reset()
+    await s.conn.close()
+    raise exc
+  finally:
+    s.writes -= 1
+
 method write*(s: LPChannel, msg: seq[byte]): Future[void] =
   ## Write to mplex channel - there may be up to MaxWrite concurrent writes
   ## pending after which the peer is disconnected
@@ -185,49 +225,13 @@ method write*(s: LPChannel, msg: seq[byte]): Future[void] =
   let fut =
     if (not closed) and msg.len > 0 and s.writes < MaxWrites and s.isOpen:
       # Fast path: Avoid a copy of msg being kept in the closure created by
-      # `{.async.}` as this drives up memory usage
+      # `{.async.}` as this drives up memory usage - the conditions are laid out
+      # in prepareWrite
       s.conn.writeMsg(s.id, s.msgCode, msg)
     else:
-      proc prepareWrite(s: LPChannel, msg: seq[byte]): Future[void] {.async.} =
-        if closed:
-          raise newLPStreamClosedError()
-
-        if msg.len == 0:
-          return
-
-        if s.writes >= MaxWrites:
-          debug "Closing connection, too many in-flight writes on channel",
-            s, conn = s.conn, writes = s.writes
-          await s.reset()
-          await s.conn.close()
-          return
-
-        if not s.isOpen:
-          await s.open()
-
-        await s.conn.writeMsg(s.id, s.msgCode, msg)
       prepareWrite(s, msg)
 
-  let msgLen = msg.len
-  proc complete(fut: Future[void]): Future[void] {.async.} =
-    try:
-      s.writes += 1
-
-      await fut
-      when defined(libp2p_network_protocols_metrics):
-        if s.tag.len > 0:
-          libp2p_protocols_bytes.inc(msgLen.int64, labelValues=[s.tag, "out"])
-
-      s.activity = true
-    except CatchableError as exc:
-      trace "exception in lpchannel write handler", s, msg = exc.msg
-      await s.reset()
-      await s.conn.close()
-      raise exc
-    finally:
-      s.writes -= 1
-
-  complete(fut)
+  s.completeWrite(fut, msg.len)
 
 proc init*(
   L: type LPChannel,
