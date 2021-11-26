@@ -13,7 +13,7 @@ import libp2p
 ```
 This is similar to the first tutorial, except we don't need to import the `Ping` protocol.
 
-Next, we'll declare our custom protocol
+Next, we'll declare our custom protocol:
 ```nim
 const TestCodec = "/test/proto/1.0.0"
 
@@ -22,27 +22,33 @@ type TestProto = ref object of LPProtocol
 
 We've set a [protocol ID](https://docs.libp2p.io/concepts/protocols/#protocol-ids), and created a custom `LPProtocol`. In a more complex protocol, we could use this structure to store interesting variables.
 
-A protocol generally has two part: and handling/server part, and a dialing/client part.  
-Theses two parts can be identical, but in our trivial protocol, the server will wait for a message from the client, and the client will send a message, so we have to handle the two cases separately.
+A protocol generally has two parts: a handling/server part, and a dialing/client part. These two parts can be identical, but in our trivial protocol, the server will wait for a message from the client, and the client will send a message, so we have to handle the two cases separately.
 
-Let's start with the server part:
+Lets start with the server part:
 ```nim
 proc new(T: typedesc[TestProto]): T =
   # every incoming connections will in be handled in this closure
   proc handle(conn: Connection, proto: string) {.async, gcsafe.} =
-    echo "Got from remote - ", string.fromBytes(await conn.readLp(1024))
+    echo "[server] received from client: ", string.fromBytes(await conn.readLp(1024))
+    await conn.writeLp("Hi back!")
     # We must close the connections ourselves when we're done with it
     await conn.close()
 
   return T(codecs: @[TestCodec], handler: handle)
 ```
-This is a constructor for our `TestProto`, that will specify our `codecs` and a `handler`, which will be called for each incoming peer asking for this protocol.  
+This is a constructor for our `TestProto`, that will specify our `codecs` and a `handler`, which will be called for each incoming peer asking for this protocol.
+
 In our handle, we simply read a message from the connection and `echo` it.
 
 We can now create our client part:
 ```nim
 proc hello(p: TestProto, conn: Connection) {.async.} =
   await conn.writeLp("Hello p2p!")
+  let
+    # readLp reads length prefixed bytes and returns a buffer without the prefix
+    strData = await conn.readLp(1024)
+    str = string.fromBytes(strData)
+  echo "[client] received from server: ", str
 ```
 Again, pretty straight-forward, we just send a message on the connection.
 
@@ -54,23 +60,23 @@ proc main() {.async, gcsafe.} =
     testProto = TestProto.new()
     switch1 = newStandardSwitch(rng=rng)
     switch2 = newStandardSwitch(rng=rng)
-  
+
   switch1.mount(testProto)
-  
+
   await switch1.start()
   await switch2.start()
-    
   let conn = await switch2.dial(switch1.peerInfo.peerId, switch1.peerInfo.addrs, TestCodec)
 
+  # conn is now a fully setup connection, we talk directly to the switch1 custom protocol handler
   await testProto.hello(conn)
 
-  # We must close the connection ourselves when we're done with it
+  # We must close the connections ourselves when we're done with it
   await conn.close()
 
-  await allFutures(switch1.stop(), switch2.stop()) # close connections and shutdown all transports
+  await allFutures(switch1.stop(), switch2.stop()) # shutdown all transports
 ```
 
-This is very similar to the first tutorial's `main`, the only noteworthy difference is that we use `newStandardSwitch`, which is similar to `createSwitch` but is bundled directly in libp2p
+This is very similar to the first tutorial's `main`. The only noteworthy difference is that we use `newStandardSwitch`, which is similar to `createSwitch` but is bundled directly in libp2p.
 
 We can now wrap our program by calling our main proc:
 ```nim
